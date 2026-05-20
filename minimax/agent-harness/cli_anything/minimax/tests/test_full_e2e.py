@@ -158,8 +158,18 @@ class TestCLISubprocessSmoke:
         models = self._run(["models"], tmp_path)
         assert "MiniMax-M2.7" in models.stdout
 
+        models_json = self._run(["--json", "models"], tmp_path)
+        model_payload = json.loads(models_json.stdout)
+        assert isinstance(model_payload, list)
+        assert model_payload[0]["id"] == "MiniMax-M2.7"
+
         voices = self._run(["voices"], tmp_path)
         assert "English_Graceful_Lady" in voices.stdout
+
+        voices_json = self._run(["--json", "voices"], tmp_path)
+        voice_payload = json.loads(voices_json.stdout)
+        assert isinstance(voice_payload, list)
+        assert "English_Graceful_Lady" in voice_payload
 
     def test_missing_api_key_fails_before_network_call(self, tmp_path):
         result = self._run(

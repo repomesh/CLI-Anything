@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 import os
 import json
+import shlex
 import click
 from pathlib import Path
 
@@ -409,6 +410,10 @@ def test(model_opt=None):
 @handle_error
 def models(show_tts):
     """List available MiniMax models."""
+    if _json_output:
+        output(TTS_MODELS if show_tts else CHAT_MODELS)
+        return
+
     if show_tts:
         for m in TTS_MODELS:
             click.echo(f"{m['id']}  — {m['description']}")
@@ -421,6 +426,10 @@ def models(show_tts):
 @handle_error
 def voices():
     """List available TTS voice IDs."""
+    if _json_output:
+        output(TTS_VOICES)
+        return
+
     for v in TTS_VOICES:
         click.echo(v)
 
@@ -471,9 +480,11 @@ def repl():
             skin.help(commands)
             continue
 
-        parts = line.split()
         try:
+            parts = shlex.split(line)
             cli.main(parts, standalone_mode=False)
+        except ValueError as e:
+            skin.error(str(e))
         except SystemExit:
             pass
         except click.exceptions.UsageError as e:
