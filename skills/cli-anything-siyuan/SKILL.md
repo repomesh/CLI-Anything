@@ -1,141 +1,93 @@
 ---
 name: "cli-anything-siyuan"
-description: >-
-  Command-line interface for SiYuan (思源笔记) — manage notebooks, documents, blocks, and search content via SiYuan HTTP API. Designed for AI agents and power users who need to operate their knowledge base without the GUI.
+description: SiYuan (思源笔记) CLI — manage notebooks, documents, blocks, and search your knowledge base from the terminal.
 ---
 
 # cli-anything-siyuan
 
-Command-line interface for [SiYuan](https://github.com/siyuan-note/siyuan) (思源笔记), a local-first knowledge management system. Connects to a running SiYuan kernel via its REST API (`http://127.0.0.1:6806`).
+CLI harness for [SiYuan](https://github.com/siyuan-note/siyuan) (思源笔记),
+a local-first knowledge management and note-taking application.
 
-## Installation
+This CLI connects to a running SiYuan kernel via its HTTP API
+(`http://127.0.0.1:6806`) and provides structured access to notebooks,
+documents, blocks, search, and export.
 
-```bash
-# Install from source
-cd siyuan/agent-harness
-pip install -e ".[repl]"
-```
+## Prerequisites
 
-**Prerequisites:**
+- SiYuan must be running (Settings → About shows the API token)
 - Python 3.10+
-- SiYuan must be running with HTTP API enabled (default port 6806)
-
-## Usage
-
-### Basic Commands
-
-```bash
-# Show help
-cli-anything-siyuan --help
-
-# Check connection status
-cli-anything-siyuan status
-
-# Start interactive REPL mode
-cli-anything-siyuan
-
-# Run with JSON output (for agent consumption)
-cli-anything-siyuan --json notebook list
-```
-
-### REPL Mode
-
-When invoked without a subcommand, the CLI enters an interactive REPL session with tab-completion:
-
-```bash
-cli-anything-siyuan
-# siyuan ❯ notebook list
-# siyuan ❯ search "keyword"
-```
+- Install: `pip install cli-anything-siyuan` or `pip install -e .` from agent-harness/
 
 ## Command Groups
 
-### Notebook
-
-Manage notebooks.
-
-| Command | Description |
-|---------|-------------|
+### notebook — Notebook management
+| Subcommand | Description |
+|------------|-------------|
 | `list` | List all notebooks |
-| `create <name>` | Create a notebook |
+| `create <name>` | Create a new notebook |
 | `rename <id> <name>` | Rename a notebook |
-| `remove <id>` | Delete a notebook (requires `--dangerous`) |
+| `remove <id>` | Delete a notebook |
 | `open <id>` | Open a notebook |
 
-### Document
-
-Manage documents within notebooks.
-
-| Command | Description |
-|---------|-------------|
-| `create <notebook> <path>` | Create a document |
+### doc — Document management
+| Subcommand | Description |
+|------------|-------------|
+| `create <notebook> <path> [--md "content"]` | Create a document |
 | `list <notebook> [path]` | List documents |
-| `tree <notebook>` | Show document tree |
-| `get <doc-id>` | Get document path and title |
+| `tree <notebook> [--path / --depth]` | Show doc tree |
+| `get <id>` | Get document path by ID |
 | `rename <id> <title>` | Rename a document |
 | `remove <id>` | Delete a document |
 
-### Block
-
-Content block operations.
-
-| Command | Description |
-|---------|-------------|
-| `get <block-id>` | View block source |
-| `children <block-id>` | View child blocks |
-| `insert <data>` | Insert a block |
+### block — Block operations
+| Subcommand | Description |
+|------------|-------------|
+| `insert <data> [--previous / --parent]` | Insert a block |
 | `update <id> <data>` | Update a block |
 | `delete <id>` | Delete a block |
+| `get <id>` | Get block kramdown source |
+| `children <id>` | Get child blocks |
 
-### Search & Query
-
+### Other commands
 | Command | Description |
 |---------|-------------|
-| `search <query>` | Full-text search across all blocks |
-| `sql <stmt>` | Run SQL queries against the SiYuan database |
-| `export md <doc-id>` | Export a document as Markdown |
+| `sql <stmt>` | Execute SQL on the block database |
+| `search <query>` | Full-text search across blocks |
+| `export md <doc-id>` | Export document as Markdown |
 | `tag list` | List all tags |
-
-### System
-
-| Command | Description |
-|---------|-------------|
-| `status` | Check connection and version info |
 | `version` | Show SiYuan kernel version |
+| `status` | Show connection and session status |
+| `repl` | Start interactive REPL |
 
-## Configuration
+## Agent Guidance
 
-Create `~/.siyuan-cli.json`:
+- Always use `--json` for machine-readable output
+- Power search: use `sql "SELECT * FROM blocks WHERE content LIKE '%keyword%'"` for SQL-level access
+- Document IDs look like `20210817205410-2kvfpfn` (timestamp-based)
+- API token can be found in SiYuan Settings → About
+- Connection defaults: `http://127.0.0.1:6806`
 
-```json
-{
-  "host": "127.0.0.1",
-  "port": 6806,
-  "token": "your-api-token"
-}
-```
-
-API token can be found in SiYuan: Settings → About → API Token.
-
-Alternatively, use environment variables: `SIYUAN_HOST`, `SIYUAN_PORT`, `SIYUAN_TOKEN`.
-
-## Testing
+## Examples
 
 ```bash
-# Install test dependencies
-pip install -e ".[test]"
+# List notebooks (JSON)
+cli-anything-siyuan --json notebook list
 
-# Run unit tests (no external dependencies)
-pytest cli_anything/siyuan/tests/test_core.py cli_anything/siyuan/tests/test_cli_commands.py -v
+# Create a document with Markdown
+cli-anything-siyuan doc create nb1 /projects/new "## Title\n\nContent"
 
-# Run all tests including E2E (requires running SiYuan)
-pytest cli_anything/siyuan/tests/ -v
+# SQL search
+cli-anything-siyuan sql "SELECT id, content FROM blocks WHERE content LIKE '%meeting%' LIMIT 5"
+
+# Export
+cli-anything-siyuan export md doc123
+
+# Enter REPL
+cli-anything-siyuan
 ```
 
-**33 tests** (12 unit + 15 CLI command tests + 6 optional E2E tests against a live instance).
+## Error Handling
 
-## Notes
-
-- All destructive operations (`remove`, `delete`, `rename`) require `--dangerous` flag
-- JSON output mode (`--json`) is available on all commands for machine consumption
-- SiYuan must be running — the CLI does not start the kernel
+- Connection errors: check that SiYuan is running and the API token is correct
+- API errors: returned as `{"code": N, "msg": "..."}` — check the message field
+- Auth errors: verify the token in `~/.siyuan-cli.json` or `SIYUAN_TOKEN` env var
