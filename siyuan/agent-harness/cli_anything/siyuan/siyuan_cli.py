@@ -277,7 +277,10 @@ def _handle_repl_command(skin: Any, cmd: str) -> None:
                             for d in items])
         elif sub == "tree" and len(parts) >= 3:
             tree = client.list_doc_tree(parts[2])
-            items = tree.get("files", []) if isinstance(tree, dict) else tree
+            if isinstance(tree, dict):
+                items = tree.get("files") or tree.get("tree") or []
+            else:
+                items = tree
             if json_mode:
                 click.echo(json.dumps(items, ensure_ascii=False))
             else:
@@ -513,7 +516,10 @@ def doc_list(ctx: SiYuanContext, notebook_id: str, path: str):
 def doc_tree(ctx: SiYuanContext, notebook_id: str, path: str, depth: int):
     """List document tree."""
     tree = ctx.client.list_doc_tree(notebook_id, path=path, max_depth=depth)
-    items = tree.get("files", []) if isinstance(tree, dict) else tree
+    if isinstance(tree, dict):
+        items = tree.get("files") or tree.get("tree") or []
+    else:
+        items = tree
     if ctx.json_output:
         click.echo(json.dumps(items, ensure_ascii=False))
     else:
