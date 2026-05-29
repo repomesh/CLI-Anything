@@ -186,6 +186,55 @@ def _capture_lane(session: Any, result: Any) -> None:
         session.domshell_lane_id = lane
 
 
+def _translate_path(harness_path: str) -> str:
+    """Translate a harness DOM path to a DOMShell command path.
+
+    The harness models ``/`` as the focused tab's AX root. DOMShell models
+    ``~/`` (and bare ``/``) as the BROWSER root — windows and tabs.
+    Sending ``ls /`` verbatim would list tabs, not page elements. Strip
+    the leading ``/`` so harness ``/main`` becomes DOMShell ``main``
+    (relative to the lane's cwd, which IS the focused tab's AX root once
+    ``page open`` has put the lane inside the tab).
+
+    - ``""`` and ``"/"`` → ``""`` (signal: operate on lane cwd; the
+      wrappers turn this into a bare command, e.g. ``ls`` or ``cd %here%``).
+    - ``"/main"`` → ``"main"``
+    - ``"/main/article"`` → ``"main/article"``
+    - ``"main"``, ``".."``, ``"."`` → passed through unchanged.
+    """
+    if not harness_path or harness_path == "/":
+        return ""
+    if harness_path.startswith("/"):
+        return harness_path[1:]
+    return harness_path
+
+
+def _is_error(result: Any) -> bool:
+    """Best-effort check that a ``domshell_execute`` result represents an error.
+
+    Inspects ``isError`` if the MCP SDK populated it, then ``isError`` /
+    ``error`` keys on dict-shaped test fixtures, and finally scans the
+    concatenated text content for a leading "error". Robust to the raw
+    ``CallToolResult`` and to the ``SimpleNamespace(content=[...])``
+    fixtures used in tests.
+    """
+    if hasattr(result, "isError") and result.isError:
+        return True
+    if isinstance(result, dict):
+        if result.get("isError"):
+            return True
+        if "error" in result:
+            return True
+    text = ""
+    content = getattr(result, "content", None)
+    if content:
+        for c in content:
+            piece = getattr(c, "text", None)
+            if piece:
+                text += piece
+    return text.strip().lower().startswith("error")
+
+
 def _assert_single_line(field: str, value: str) -> None:
     """Reject newline characters in a user-supplied string.
 
@@ -358,7 +407,9 @@ def ls(path: str = "/", use_daemon: bool = False, *, session: Any = None) -> dic
         >>> ls("/")
         {"path": "/", "entries": [{"name": "main", "role": "landmark", ...}]}
     """
-    return asyncio.run(_call_execute(f"ls {_q(path)}", use_daemon, session=session))
+    translated = _translate_path(path)
+    command = f"ls {_q(translated)}" if translated else "ls"
+    return asyncio.run(_call_execute(command, use_daemon, session=session))
 
 
 def cd(path: str, use_daemon: bool = False, *, session: Any = None) -> dict:
@@ -376,7 +427,12 @@ def cd(path: str, use_daemon: bool = False, *, session: Any = None) -> dict:
         >>> cd("/main/div[0]")
         {"path": "/main/div[0]", "element": {...}}
     """
-    return asyncio.run(_call_execute(f"cd {_q(path)}", use_daemon, session=session))
+    translated = _translate_path(path)
+    # Harness `cd /` means "back to focused-tab AX root" — DOMShell's
+    # equivalent is `cd %here%`, which jumps to the tab root regardless
+    # of where the lane wandered to.
+    command = "cd %here%" if not translated else f"cd {_q(translated)}"
+    return asyncio.run(_call_execute(command, use_daemon, session=session))
 
 
 def cat(path: str, use_daemon: bool = False, *, session: Any = None) -> dict:
@@ -394,7 +450,13 @@ def cat(path: str, use_daemon: bool = False, *, session: Any = None) -> dict:
         >>> cat("/main/button[0]")
         {"name": "Submit", "role": "button", "text": "Submit", ...}
     """
-    return asyncio.run(_call_execute(f"cat {_q(path)}", use_daemon, session=session))
+    translated = _translate_path(path)
+    if not translated:
+        raise ValueError(
+            "cat: an element name is required — cannot cat the tab root. "
+            "Use `ls` to list the root's children, or pass a specific name."
+        )
+    return asyncio.run(_call_execute(f"cat {_q(translated)}", use_daemon, session=session))
 
 
 def grep(
@@ -440,10 +502,18 @@ def grep(
         {"matches": ["/main/button[0]"]}
     """
     _assert_single_line("pattern", pattern)
-    if path and path != "/":
+    translated_path = _translate_path(path)
+    translated_prev = _translate_path(prev)
+    if translated_path:
         _assert_single_line("path", path)
         _assert_single_line("prev", prev)
-        command = f"cd {_q(path)}\ngrep {_q(pattern)}\ncd {_q(prev)}"
+        # Harness `/` (the default for `prev`) means "back to focused-tab
+        # AX root", which is DOMShell's `cd %here%`. Any other restore
+        # path becomes `cd <translated>`.
+        restore = (
+            f"cd {_q(translated_prev)}" if translated_prev else "cd %here%"
+        )
+        command = f"cd {_q(translated_path)}\ngrep {_q(pattern)}\n{restore}"
         return asyncio.run(_call_execute(command, use_daemon, session=session))
     return asyncio.run(
         _call_execute(f"grep {_q(pattern)}", use_daemon, session=session)
@@ -465,8 +535,13 @@ def click(path: str, use_daemon: bool = False, *, session: Any = None) -> dict:
         >>> click("/main/button[0]")
         {"action": "click", "path": "/main/button[0]", "status": "success"}
     """
+    translated = _translate_path(path)
+    if not translated:
+        raise ValueError(
+            "click: an element name is required — cannot click the tab root."
+        )
     return asyncio.run(
-        _call_execute(f"click {_q(path)}", use_daemon, session=session)
+        _call_execute(f"click {_q(translated)}", use_daemon, session=session)
     )
 
 
@@ -538,17 +613,28 @@ def type_text(
 ) -> dict:
     """Type text into an input element.
 
-    Focuses the element and types in a single ``domshell_execute`` call so
-    focus state is guaranteed to be in place when ``type`` runs (one MCP
-    round-trip, atomic).
+    Issued as two separate ``domshell_execute`` calls — ``focus``, check
+    for error, then ``type`` only if ``focus`` succeeded. Both share the
+    persisted lane id (via ``session``), so the focus state from the
+    first call carries into the second.
+
+    Why split: DOMShell's multi-line splitter continues past per-line
+    errors (apireno/DOMShell#46). That's the right semantic for cleanup
+    chains like ``cd / grep / cd back`` (the restore must always run)
+    but the WRONG semantic for safety chains like ``focus / type`` — a
+    failed ``focus`` followed by a successful ``type`` would dispatch
+    keys into whatever was previously focused (potentially a password
+    field). Halting between focus and type prevents that.
 
     Args:
         path: Path to input element
         text: Text to type
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
-        Dict with action result
+        Dict with action result. If ``focus`` errors, returns the focus
+        result without calling ``type``.
 
     Raises:
         ValueError: If ``path`` or ``text`` contains a newline. DOMShell's
@@ -558,8 +644,24 @@ def type_text(
     """
     _assert_single_line("path", path)
     _assert_single_line("text", text)
-    command = f"focus {_q(path)}\ntype {_q(text)}"
-    return asyncio.run(_call_execute(command, use_daemon, session=session))
+    translated_path = _translate_path(path)
+    if not translated_path:
+        raise ValueError(
+            "type_text: an element name is required — cannot focus the tab root."
+        )
+    # Relies on DOMShell serializing commands within a lane: the `type`
+    # call below cannot be preempted by another agent's `focus` on the
+    # same lane between these two _call_execute boundaries. If that
+    # contract ever changes upstream, this needs to revert to a single
+    # multi-line call with an alternative safety story.
+    focus_result = asyncio.run(_call_execute(
+        f"focus {_q(translated_path)}", use_daemon, session=session,
+    ))
+    if _is_error(focus_result):
+        return focus_result  # don't type — focus didn't land
+    return asyncio.run(_call_execute(
+        f"type {_q(text)}", use_daemon, session=session,
+    ))
 
 
 # ── Daemon control functions ───────────────────────────────────────────

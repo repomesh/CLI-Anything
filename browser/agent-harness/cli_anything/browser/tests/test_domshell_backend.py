@@ -15,6 +15,126 @@ from cli_anything.browser.core.session import Session
 from cli_anything.browser.utils import domshell_backend as backend
 
 
+# ── Path translation: harness `/` vs DOMShell `~/` ───────────────────
+
+
+def test_translate_path_root_maps_to_empty():
+    """Harness `/` (focused-tab AX root) → DOMShell empty (lane cwd)."""
+    assert backend._translate_path("/") == ""
+    assert backend._translate_path("") == ""
+
+
+def test_translate_path_strips_leading_slash():
+    assert backend._translate_path("/main") == "main"
+    assert backend._translate_path("/main/article") == "main/article"
+
+
+def test_translate_path_preserves_relative():
+    """Relative paths pass through unchanged — DOMShell handles them."""
+    assert backend._translate_path("main") == "main"
+    assert backend._translate_path("..") == ".."
+    assert backend._translate_path(".") == "."
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_ls_root_sends_bare_ls(mock_call):
+    """`ls /` (harness) → bare `ls` (DOMShell), operating on lane cwd."""
+    mock_call.return_value = _make_result("[lane: 1]")
+    backend.ls("/")
+    assert mock_call.call_args.args[0] == "ls"
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_ls_subpath_strips_leading_slash(mock_call):
+    mock_call.return_value = _make_result("[lane: 1]")
+    backend.ls("/main")
+    assert mock_call.call_args.args[0] == "ls main"
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_cd_root_uses_here(mock_call):
+    """`cd /` (harness) → `cd %here%` (DOMShell jump-to-tab-root)."""
+    mock_call.return_value = _make_result("[lane: 1]")
+    backend.cd("/")
+    assert mock_call.call_args.args[0] == "cd %here%"
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_cd_subpath_strips_leading_slash(mock_call):
+    mock_call.return_value = _make_result("[lane: 1]")
+    backend.cd("/main/div[0]")
+    assert mock_call.call_args.args[0] == "cd 'main/div[0]'"
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_cat_strips_leading_slash(mock_call):
+    mock_call.return_value = _make_result("[lane: 1]")
+    backend.cat("/main/button[0]")
+    assert mock_call.call_args.args[0] == "cat 'main/button[0]'"
+
+
+def test_cat_root_raises_value_error():
+    """Calling cat against the tab root is a programming error — fail clearly."""
+    with pytest.raises(ValueError, match="element name is required"):
+        backend.cat("/")
+    with pytest.raises(ValueError, match="element name is required"):
+        backend.cat("")
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_click_strips_leading_slash(mock_call):
+    mock_call.return_value = _make_result("[lane: 1]")
+    backend.click("/main/button[0]")
+    assert mock_call.call_args.args[0] == "click 'main/button[0]'"
+
+
+def test_click_root_raises_value_error():
+    with pytest.raises(ValueError, match="element name is required"):
+        backend.click("/")
+    with pytest.raises(ValueError, match="element name is required"):
+        backend.click("")
+
+
+def test_type_text_root_raises_value_error():
+    """Focusing the tab root is a programming error — same class as cat/click."""
+    with pytest.raises(ValueError, match="element name is required"):
+        backend.type_text("/", "hello")
+    with pytest.raises(ValueError, match="element name is required"):
+        backend.type_text("", "hello")
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_grep_rooted_with_subpath_prev_keeps_translated_restore(mock_call):
+    """A non-`/` prev should also be translated, not sent verbatim."""
+    mock_call.return_value = _make_result("[lane: 1]")
+    backend.grep("Login", path="/main/dialog", prev="/main")
+    assert mock_call.call_args.args[0] == "cd main/dialog\ngrep Login\ncd main"
+
+
+# ── _is_error helper ─────────────────────────────────────────────────
+
+
+def test_is_error_detects_isError_attribute():
+    assert backend._is_error(SimpleNamespace(isError=True)) is True
+    assert backend._is_error(SimpleNamespace(isError=False)) is False
+
+
+def test_is_error_detects_dict_keys():
+    assert backend._is_error({"isError": True}) is True
+    assert backend._is_error({"error": "boom"}) is True
+    assert backend._is_error({"path": "/main"}) is False
+
+
+def test_is_error_detects_error_prefixed_text():
+    assert backend._is_error(_make_result("Error: no such element")) is True
+    assert backend._is_error(_make_result("ERROR: case insensitive")) is True
+    assert backend._is_error(_make_result("✓ Focused\n[lane: 1]")) is False
+
+
+def test_is_error_handles_missing_content():
+    assert backend._is_error(SimpleNamespace()) is False
+
+
 # ── grep: command string and call sequencing ──────────────────────────
 
 
@@ -43,8 +163,10 @@ def test_grep_rooted_emits_single_multiline_call(mock_call):
 
     backend.grep("Login", path="/main", prev="/")
 
+    # Harness `/main` translates to DOMShell `main`; harness `/` (the
+    # default prev) translates to `cd %here%`.
     assert mock_call.call_args_list == [
-        call("cd /main\ngrep Login\ncd /", False, session=None),
+        call("cd main\ngrep Login\ncd %here%", False, session=None),
     ]
 
 
@@ -72,11 +194,12 @@ def test_grep_rooted_quotes_path_with_spaces(mock_call):
     backend.grep("Login", path="/path with spaces", prev="/")
 
     cmd = mock_call.call_args.args[0]
-    # shlex.quote single-quotes anything containing whitespace; the rest
-    # of the multi-line layout (grep + cd back) stays intact.
-    assert cmd.startswith("cd '/path with spaces'\n")
+    # _translate_path strips the leading "/", then shlex.quote single-
+    # quotes the remainder; the multi-line layout (grep + cd back) stays
+    # intact, with the restore using `cd %here%` for the harness-`/` prev.
+    assert cmd.startswith("cd 'path with spaces'\n")
     assert "\ngrep Login\n" in cmd
-    assert cmd.endswith("\ncd /")
+    assert cmd.endswith("\ncd %here%")
 
 
 @patch.object(backend, "_call_execute", new_callable=AsyncMock)
@@ -119,15 +242,38 @@ def test_grep_keyword_use_daemon_still_works():
 
 
 @patch.object(backend, "_call_execute", new_callable=AsyncMock)
-def test_type_text_emits_focus_then_type_in_one_call(mock_call):
-    """type_text builds a single multi-line ``focus … \\ntype …`` execute call."""
-    mock_call.return_value = {}
+def test_type_text_uses_two_separate_calls(mock_call):
+    """type_text issues focus + type as two separate execute calls.
+
+    The split is for safety: DOMShell's multi-line splitter continues
+    past per-line errors, so a single ``focus path\\ntype text`` call
+    would dispatch keys into stale focus if ``focus`` failed. Two calls
+    with an error check between them prevents that.
+    """
+    mock_call.return_value = _make_result("✓ Focused\n[lane: 1]")
 
     backend.type_text("search_input", "machine learning")
 
-    assert mock_call.call_args_list == [
-        call("focus search_input\ntype 'machine learning'", False, session=None),
+    assert mock_call.call_count == 2
+    assert mock_call.call_args_list[0].args[0] == "focus search_input"
+    assert mock_call.call_args_list[1].args[0] == "type 'machine learning'"
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_type_text_skips_type_on_focus_error(mock_call):
+    """If focus errors, type MUST NOT run — would land in stale focus."""
+    mock_call.side_effect = [
+        _make_result("Error: focus: No such element"),
+        _make_result("✓ Typed"),  # should NOT be reached
     ]
+
+    result = backend.type_text("/stale/path", "secret_password")
+
+    # Only the focus call was made; the focus result was returned.
+    assert mock_call.call_count == 1
+    assert mock_call.call_args_list[0].args[0] == "focus stale/path"
+    # The focus result is returned verbatim so callers see the error.
+    assert result.content[0].text == "Error: focus: No such element"
 
 
 def test_type_text_rejects_newline_in_text():
@@ -428,7 +574,8 @@ def test_session_is_keyword_only_on_open_url():
 def test_use_daemon_positional_on_ls(mock_call):
     mock_call.return_value = {}
     backend.ls("/", True)  # use_daemon=True positionally
-    assert mock_call.call_args == call("ls /", True, session=None)
+    # Harness `/` translates to "" so ls sends the bare command.
+    assert mock_call.call_args == call("ls", True, session=None)
 
 
 @patch.object(backend, "_call_execute", new_callable=AsyncMock)
@@ -447,8 +594,11 @@ def test_use_daemon_positional_on_reload(mock_call):
 
 @patch.object(backend, "_call_execute", new_callable=AsyncMock)
 def test_use_daemon_positional_on_type_text(mock_call):
-    mock_call.return_value = {}
+    """Positional ``use_daemon`` flows through both halves of the split."""
+    mock_call.return_value = _make_result("✓\n[lane: 1]")
     backend.type_text("input", "hello", True)
-    assert mock_call.call_args == call(
-        "focus input\ntype hello", True, session=None
-    )
+    # Two calls (focus then type), both with use_daemon=True positionally.
+    assert mock_call.call_args_list == [
+        call("focus input", True, session=None),
+        call("type hello", True, session=None),
+    ]
