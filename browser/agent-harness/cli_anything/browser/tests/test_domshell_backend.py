@@ -216,9 +216,14 @@ def test_grep_rooted_absolute_restores_to_session_wd(mock_call):
 
 @patch.object(backend, "_call_execute", new_callable=AsyncMock)
 def test_ls_anchor_failure_short_circuits(mock_call):
-    """ls absolute-path anchor failure → only the anchor call ran."""
+    """ls absolute-path anchor failure → only the anchor call ran.
+
+    Uses DOMShell's actual error shape: ANSI-red-wrapped, command-
+    prefixed ("cd: ...") — not the imaginary "Error: ..." prefix that
+    silently bypassed ``_is_error`` for several rounds.
+    """
     mock_call.return_value = _make_result(
-        "\x1b[31mError: chrome:// not debuggable\x1b[0m"
+        "\x1b[31mcd: tab 12345 is outside the session group\x1b[0m"
     )
     sess = _make_session(working_dir="/")
     result = backend.ls("/main", session=sess)
@@ -230,7 +235,7 @@ def test_ls_anchor_failure_short_circuits(mock_call):
 @patch.object(backend, "_call_execute", new_callable=AsyncMock)
 def test_cat_anchor_failure_short_circuits(mock_call):
     mock_call.return_value = _make_result(
-        "\x1b[31mError: no such path\x1b[0m"
+        "\x1b[31mcd: chrome:// not debuggable\x1b[0m"
     )
     sess = _make_session(working_dir="/")
     result = backend.cat("/main/btn", session=sess)
@@ -245,7 +250,7 @@ def test_click_anchor_failure_short_circuits(mock_call):
     unintended action. Anchor must halt before the click runs.
     """
     mock_call.return_value = _make_result(
-        "\x1b[31mError: chrome:// not debuggable\x1b[0m"
+        "\x1b[31mcd: chrome:// not debuggable\x1b[0m"
     )
     sess = _make_session(working_dir="/")
     result = backend.click("/main/button[0]", session=sess)
@@ -261,7 +266,7 @@ def test_grep_rooted_anchor_failure_short_circuits(mock_call):
     never moved off the original cwd.
     """
     mock_call.return_value = _make_result(
-        "\x1b[31mError: no such path /missing\x1b[0m"
+        "\x1b[31mcd: /missing: No such directory\x1b[0m"
     )
     sess = _make_session(working_dir="/")
     result = backend.grep("Login", path="/missing", prev="/", session=sess)
@@ -306,13 +311,17 @@ def test_parse_execute_result_grep_extracts_matches():
 
 def test_parse_execute_result_error_returns_error_dict():
     """Errors get `error` AND `output` keys — the CLI checks `"error" in
-    result` for cd-style guards but also pretty-prints `output`."""
+    result` for cd-style guards but also pretty-prints `output`.
+
+    Uses the actual DOMShell error shape: ANSI-red-wrapped, command-
+    prefixed (``ls: ...``).
+    """
     result = _make_result(
-        "\x1b[31mError: no such element\x1b[0m\n[lane: 7]"
+        "\x1b[31mls: main: No such directory\x1b[0m\n[lane: 7]"
     )
     parsed = backend._parse_execute_result(result, "ls")
     assert "error" in parsed
-    assert parsed["error"].startswith("\x1b[31mError")
+    assert parsed["error"].startswith("\x1b[31mls:")
     assert parsed["output"] == parsed["error"]
 
 
@@ -363,9 +372,10 @@ def test_cd_returns_dict_with_output(mock_call):
 def test_cd_error_returns_error_dict(mock_call):
     """`fs.change_directory` checks `"error" not in result` — make sure
     error paths surface the error key so the harness's working-dir
-    update is correctly skipped."""
+    update is correctly skipped. Uses the actual DOMShell error shape.
+    """
     mock_call.return_value = _make_result(
-        "\x1b[31mError: no such path\x1b[0m"
+        "\x1b[31mcd: /missing: No such directory\x1b[0m"
     )
     result = backend.cd("/missing")
     assert "error" in result
@@ -385,28 +395,53 @@ def test_is_error_detects_dict_keys():
     assert backend._is_error({"path": "/main"}) is False
 
 
-def test_is_error_detects_error_prefixed_text():
-    assert backend._is_error(_make_result("Error: no such element")) is True
-    assert backend._is_error(_make_result("ERROR: case insensitive")) is True
-    assert backend._is_error(_make_result("✓ Focused\n[lane: 1]")) is False
-
-
-def test_is_error_strips_ansi_red_wrapper():
-    """DOMShell colours errors red — strip ANSI before prefix-matching.
-
-    Without this, a coloured error like `\\x1b[31mError: ...\\x1b[0m`
-    would be misread as success (its first chars are `\\x1b[31m`, not
-    `error`), letting downstream safety chains proceed.
+def test_is_error_detects_ansi_red_wrapper():
+    """Common DOMShell error shape: ANSI red around a command-prefixed
+    message. These do NOT start with the literal "error" — the earlier
+    detection that ANSI-stripped first then ``startswith("error")``
+    failed every one of these, silently regressing the safety chain
+    across every wrapper. Catch on the ``\\x1b[31m`` red marker
+    instead.
     """
     assert backend._is_error(
-        _make_result("\x1b[31mError: focus: No such element\x1b[0m")
+        _make_result("\x1b[31mcd: foo: No such directory\x1b[0m")
     ) is True
-    # Plain `Error:` still detected.
-    assert backend._is_error(_make_result("Error: oops")) is True
-    # Mixed ANSI prefix without "Error" stays False.
     assert backend._is_error(
-        _make_result("\x1b[32m✓ All good\x1b[0m")
+        _make_result("\x1b[31mfocus: No such element\x1b[0m")
+    ) is True
+    assert backend._is_error(
+        _make_result("\x1b[31mls: main: No such directory\x1b[0m")
+    ) is True
+    assert backend._is_error(
+        _make_result("\x1b[31mcd: tab 12345 is outside the session group\x1b[0m")
+    ) is True
+
+
+def test_is_error_detects_explicit_error_prefix_without_ansi():
+    """Fallback: rarer non-coloured errors or pre-stripped input still
+    detected via ``"error:"`` prefix.
+    """
+    assert backend._is_error(_make_result("Error: bad command")) is True
+    assert backend._is_error(_make_result("ERROR: case insensitive")) is True
+
+
+def test_is_error_does_not_flag_success_in_other_colors():
+    """Anti-false-positive: only ``\\x1b[31m`` (red) signals an error.
+    Success commonly wraps in ``\\x1b[32m`` (green) — must not flag.
+    """
+    assert backend._is_error(
+        _make_result("\x1b[32m✓ ok\x1b[0m")
     ) is False
+    assert backend._is_error(
+        _make_result("✓ command completed")
+    ) is False
+    assert backend._is_error(
+        _make_result("✓ Focused\n[lane: 1]")
+    ) is False
+
+
+def test_is_error_handles_empty():
+    assert backend._is_error(_make_result("")) is False
 
 
 def test_is_error_handles_missing_content():
@@ -557,10 +592,10 @@ def test_type_text_absolute_path_focus_failure_skips_type_and_restores(mock_call
     """
     sess = _make_session(working_dir="/main")
     mock_call.side_effect = [
-        _make_result("✓ Entered tab 123\n[lane: 1]"),                 # cd anchor ok
-        _make_result("\x1b[31mError: focus: No such element\x1b[0m"),  # focus fails
-        _make_result("✓ Typed\n[lane: 1]"),                            # MUST NOT be reached
-        _make_result("✓\n[lane: 1]"),                                   # restore
+        _make_result("✓ Entered tab 123\n[lane: 1]"),                  # cd anchor ok
+        _make_result("\x1b[31mfocus: No such element\x1b[0m"),          # focus fails
+        _make_result("✓ Typed\n[lane: 1]"),                             # MUST NOT be reached
+        _make_result("✓\n[lane: 1]"),                                    # restore
     ]
 
     backend.type_text("/main/missing", "secret_password", session=sess)
@@ -584,7 +619,7 @@ def test_type_text_anchor_failure_does_not_attempt_focus(mock_call):
     """
     sess = _make_session(working_dir="/")
     mock_call.return_value = _make_result(
-        "\x1b[31mError: chrome:// not debuggable\x1b[0m"
+        "\x1b[31mcd: chrome:// not debuggable\x1b[0m"
     )
 
     backend.type_text("/some/path", "text", session=sess)
@@ -603,7 +638,7 @@ def test_type_text_relative_path_focus_failure_skips_type(mock_call):
     """
     sess = _make_session(working_dir="/")
     mock_call.side_effect = [
-        _make_result("Error: focus: No such element"),
+        _make_result("\x1b[31mfocus: No such element\x1b[0m"),  # focus fails
         _make_result("✓ Typed"),  # should NOT be reached
     ]
 
@@ -614,8 +649,8 @@ def test_type_text_relative_path_focus_failure_skips_type(mock_call):
     assert mock_call.call_args_list[0].args[0] == "focus stale_input"
     # The focus result is parsed (CLI consumes dicts, not CallToolResult).
     assert result == {
-        "error": "Error: focus: No such element",
-        "output": "Error: focus: No such element",
+        "error": "\x1b[31mfocus: No such element\x1b[0m",
+        "output": "\x1b[31mfocus: No such element\x1b[0m",
     }
 
 

@@ -39,7 +39,7 @@ DOMShell is an npm package that exposes Chrome's Accessibility Tree via MCP:
 
 ```bash
 # Verify DOMShell is available (2.0.0 or newer required)
-npx @apireno/domshell@2.0.0 --version
+npx @apireno/domshell --version
 
 # Install Chrome extension
 # https://chromewebstore.google.com/detail/domshell

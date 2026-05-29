@@ -297,32 +297,55 @@ _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _is_error(result: Any) -> bool:
-    """Best-effort check that a ``domshell_execute`` result represents an error.
+    """Detect whether a ``domshell_execute`` result represents an error.
 
-    Inspects ``isError`` if the MCP SDK populated it, then ``isError`` /
-    ``error`` keys on dict-shaped test fixtures, and finally scans the
-    concatenated text content for a leading "error" — with ANSI escape
-    sequences stripped first, since DOMShell colours error lines red
-    (``\\x1b[31mError: ...\\x1b[0m``). Robust to the raw
-    ``CallToolResult`` and to ``SimpleNamespace(content=[...])`` test
-    fixtures.
+    DOMShell's actual error shape (verified upstream) is ANSI-red-wrapped
+    AND command-prefixed, e.g.:
+
+    * ``\\x1b[31mcd: foo: No such directory\\x1b[0m``
+    * ``\\x1b[31mfocus: No such element\\x1b[0m``
+    * ``\\x1b[31mls: main: No such directory\\x1b[0m``
+
+    Note none of these start with the literal "error" — the earlier
+    detection that ANSI-stripped first then checked ``startswith("error")``
+    silently failed every command-prefixed case, which silently regressed
+    the safety chain across ``ls`` / ``cat`` / ``click`` / ``grep`` /
+    ``type_text`` (Codex PR #308 round 7+). The fix: detect the
+    ``\\x1b[31m`` red color marker BEFORE ANSI stripping — DOMShell wraps
+    every error in red and uses different codes (e.g. ``\\x1b[32m``
+    green) for success.
+
+    Inspects ``isError`` and dict ``error``/``isError`` keys first
+    (covers the MCP SDK's explicit error flag and dict test fixtures),
+    then the ANSI-red marker, with a final fallback to a stripped
+    ``Error:`` prefix for any input that has been pre-stripped (e.g. by
+    a transport layer) or that arrives without DOMShell's coloring.
     """
     if hasattr(result, "isError") and result.isError:
         return True
     if isinstance(result, dict):
-        if result.get("isError"):
+        if result.get("isError") or result.get("error"):
             return True
-        if "error" in result:
-            return True
-    text = ""
-    content = getattr(result, "content", None)
-    if content:
-        for c in content:
-            piece = getattr(c, "text", None)
-            if piece:
-                text += piece
-    text = _ANSI_CSI_RE.sub("", text)
-    return text.strip().lower().startswith("error")
+
+    text = _extract_text(result)
+    if not text:
+        return False
+
+    # DOMShell wraps errors in ANSI red. Detect BEFORE stripping; the
+    # color code IS the signal, and the message that follows is
+    # typically command-prefixed (cd: …, focus: …, ls: …) rather than
+    # "Error:"-prefixed.
+    if "\x1b[31m" in text:
+        return True
+
+    # Fallback: ANSI-stripped text with explicit "Error:" prefix.
+    # Catches rarer non-colored errors and any input that arrives
+    # pre-stripped.
+    cleaned = _ANSI_CSI_RE.sub("", text).strip().lower()
+    if cleaned.startswith("error:"):
+        return True
+
+    return False
 
 
 def _extract_text(result: Any) -> str:
@@ -558,11 +581,22 @@ def ls(path: str = "/", use_daemon: bool = False, *, session: Any = None) -> dic
         session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
-        Dict with 'entries' key containing list of accessible elements
+        Dict shaped ``{"entries": [{"name": str, "role": "", "path": str}, ...],
+        "raw": str}`` (or ``{"error": str, "output": str}`` on failure —
+        wrappers reuse ``_parse_execute_result``'s contract).
+
+        ``name`` and ``path`` carry the raw line text from DOMShell's
+        ``ls`` output; directory entries currently include a trailing
+        ``/`` (cosmetic, see follow-up). ``role`` is always empty in
+        this round — structured role extraction will land alongside a
+        finer column parser in the follow-up.
 
     Example:
-        >>> ls("/")
-        {"path": "/", "entries": [{"name": "main", "role": "landmark", ...}]}
+        >>> ls("/main")
+        {"entries": [{"name": "heading_1", "role": "", "path": "heading_1"},
+                     {"name": "div/",      "role": "", "path": "div/"},
+                     ...],
+         "raw": "heading_1\\ndiv/\\n..."}
     """
     translated, is_absolute = _translate_path(path)
     if is_absolute:
@@ -601,11 +635,21 @@ def cd(path: str, use_daemon: bool = False, *, session: Any = None) -> dict:
         session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
-        Dict with 'path' key confirming current location
+        Dict shaped ``{"output": str}`` on success, or
+        ``{"error": str, "output": str}`` on failure.
+
+        Note no ``"path"`` key — ``fs.change_directory`` falls back to
+        the input ``path`` arg via ``result.get("path", path)``, so the
+        harness's ``working_dir`` ends up at the requested target. The
+        ``output`` field carries DOMShell's raw confirmation text for
+        display.
 
     Example:
         >>> cd("/main/div[0]")
-        {"path": "/main/div[0]", "element": {...}}
+        {"output": "✓ Entered /main/div[0]"}
+        >>> cd("/missing")
+        {"error": "cd: /missing: No such directory",
+         "output": "cd: /missing: No such directory"}
     """
     translated, is_absolute = _translate_path(path)
     # cd is the one wrapper where the operation IS the new state — no
@@ -718,7 +762,13 @@ def grep(
         ))
         return _parse_execute_result(op, "grep")
 
-    _assert_single_line("path", path)
+    # `path` was already newline-guarded by `_translate_path` above
+    # (round 6's translation-boundary check) so the field-named
+    # `_assert_single_line("path", path)` we used to call here would be
+    # dead. `prev`, however, is only translated in the relative branch
+    # below — the absolute branch doesn't touch it. Keep the explicit
+    # field-named guard for `prev` so a newlined-prev kwarg raises a
+    # useful error regardless of which branch consumes it.
     _assert_single_line("prev", prev)
 
     # Split-and-check. Anchor success is load-bearing: if the cd
@@ -801,11 +851,22 @@ def open_url(url: str, use_daemon: bool = False, *, session: Any = None) -> dict
         session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
-        Dict with navigation result
+        Dict shaped ``{"output": str}`` on success, or
+        ``{"error": str, "output": str}`` on failure.
+
+        Note no ``"url"`` key. ``page.open_page`` already calls
+        ``session.set_url(url)`` from the input arg unconditionally, so
+        this isn't a regression for ``open_url`` callers. But the same
+        absence applies to ``back()`` / ``forward()`` — ``page.go_back``
+        and ``page.go_forward`` guard their ``session.set_url`` updates
+        on ``"url" in result``, and that guard now always evaluates
+        False (it was already False against the pre-parse
+        ``CallToolResult`` shape, so no behavior change vs main, but
+        worth knowing for future parser refinement).
 
     Example:
         >>> open_url("https://example.com")
-        {"url": "https://example.com", "status": "loaded"}
+        {"output": "✓ Opened https://example.com\\n[lane: 1]"}
     """
     result = asyncio.run(
         _call_execute(f"open {_q(url)}", use_daemon, session=session)
@@ -835,7 +896,15 @@ def back(use_daemon: bool = False, *, session: Any = None) -> dict:
         session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
-        Dict with navigation result
+        Dict shaped ``{"output": str}`` on success, or
+        ``{"error": str, "output": str}`` on failure.
+
+        Note no ``"url"`` key. ``page.go_back`` guards its
+        ``session.set_url`` update on ``"url" in result`` and that
+        guard now always evaluates False — ``session.current_url`` is
+        not updated from a back navigation. (Same end behavior as
+        against the pre-parse ``CallToolResult`` shape, but worth
+        knowing for future parser refinement.)
     """
     result = asyncio.run(_call_execute("back", use_daemon, session=session))
     return _parse_execute_result(result, "back")
@@ -849,7 +918,15 @@ def forward(use_daemon: bool = False, *, session: Any = None) -> dict:
         session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
-        Dict with navigation result
+        Dict shaped ``{"output": str}`` on success, or
+        ``{"error": str, "output": str}`` on failure.
+
+        Note no ``"url"`` key. ``page.go_forward`` guards its
+        ``session.set_url`` update on ``"url" in result`` and that
+        guard now always evaluates False — ``session.current_url`` is
+        not updated from a forward navigation. (Same end behavior as
+        against the pre-parse ``CallToolResult`` shape, but worth
+        knowing for future parser refinement.)
     """
     result = asyncio.run(_call_execute("forward", use_daemon, session=session))
     return _parse_execute_result(result, "forward")
