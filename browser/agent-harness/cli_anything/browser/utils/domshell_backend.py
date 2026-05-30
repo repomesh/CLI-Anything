@@ -639,7 +639,7 @@ def ls(path: str = "/", use_daemon: bool = False, *, session: Any = None) -> dic
         finer column parser in the follow-up.
 
     Example:
-        >>> ls("/main")
+        >>> ls("/main", session=session)   # session required for absolute paths
         {"entries": [{"name": "heading_1", "role": "", "path": "heading_1"},
                      {"name": "div/",      "role": "", "path": "div/"},
                      ...],
@@ -727,8 +727,8 @@ def cat(path: str, use_daemon: bool = False, *, session: Any = None) -> dict:
         Dict with element details including text, role, attributes
 
     Example:
-        >>> cat("/main/button[0]")
-        {"name": "Submit", "role": "button", "text": "Submit", ...}
+        >>> cat("/main/button[0]", session=session)   # required for absolute paths
+        {"output": "button: Submit\\n..."}
     """
     translated, is_absolute = _translate_path(path)
     if not translated:
@@ -797,10 +797,10 @@ def grep(
         Dict with 'matches' key containing list of matching elements
 
     Example:
-        >>> grep("Login")
-        {"matches": ["/main/button[0]", "/main/link[1]"]}
-        >>> grep("Login", path="/main")
-        {"matches": ["/main/button[0]"]}
+        >>> grep("Login")                                # unrooted — session optional
+        {"matches": ["/main/button[0]", "/main/link[1]"], "raw": "..."}
+        >>> grep("Login", path="/main", session=session)   # rooted → session required
+        {"matches": ["/main/button[0]"], "raw": "..."}
     """
     _assert_single_line("pattern", pattern)
     translated_path, path_abs = _translate_path(path)
@@ -866,8 +866,8 @@ def click(path: str, use_daemon: bool = False, *, session: Any = None) -> dict:
         Dict with action result
 
     Example:
-        >>> click("/main/button[0]")
-        {"action": "click", "path": "/main/button[0]", "status": "success"}
+        >>> click("/main/button[0]", session=session)   # required for absolute paths
+        {"output": "✓ Clicked\\n[lane: 1]"}
     """
     translated, is_absolute = _translate_path(path)
     if not translated:
