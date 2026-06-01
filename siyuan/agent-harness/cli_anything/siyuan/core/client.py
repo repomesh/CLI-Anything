@@ -65,6 +65,7 @@ class SiYuanClient:
     def __init__(self, config: SiYuanConfig | None = None):
         self.config = config or load_config()
         self._session = requests.Session()
+        self._session.trust_env = False
         if self.config.token:
             self._session.headers["Authorization"] = f"Token {self.config.token}"
         self._session.headers["Content-Type"] = "application/json"
