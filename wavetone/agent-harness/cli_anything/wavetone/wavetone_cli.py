@@ -305,7 +305,7 @@ def wavetone_launch(ctx: click.Context, audio_path: str | None, executable: str 
             wait_seconds=wait_seconds,
             terminate=terminate,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     failed_launch = (
         wait_seconds > 0

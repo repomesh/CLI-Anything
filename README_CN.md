@@ -679,7 +679,7 @@ gimp          107 passed  ✅   (64 unit + 43 e2e)
 blender       208 passed  ✅   (150 unit + 58 e2e)
 inkscape      202 passed  ✅   (148 unit + 54 e2e)
 audacity      161 passed  ✅   (107 unit + 54 e2e)
-wavetone       23 passed  ✅   (18 unit + 5 e2e)
+wavetone       24 passed  ✅   (19 unit + 5 e2e)
 libreoffice   158 passed  ✅   (89 unit + 69 e2e)
 obs-studio    153 passed  ✅   (116 unit + 37 e2e)
 kdenlive      155 passed  ✅   (111 unit + 44 e2e)
@@ -753,7 +753,7 @@ cli-anything/
 ├── 🧊 blender/agent-harness/            # Blender CLI（208 项测试）
 ├── ✏️ inkscape/agent-harness/            # Inkscape CLI（202 项测试）
 ├── 🎵 audacity/agent-harness/           # Audacity CLI（161 项测试）
-├── wavetone/agent-harness/              # WaveTone CLI（23 项测试：18 unit + 5 e2e）
+├── wavetone/agent-harness/              # WaveTone CLI（24 项测试：19 unit + 5 e2e）
 ├── 📄 libreoffice/agent-harness/        # LibreOffice CLI（158 项测试）
 ├── 📚 zotero/agent-harness/             # Zotero CLI（新增，支持文献导入）
 ├── 📓 joplin/agent-harness/             # Joplin CLI（134 测试：107 单元 + 27 e2e）

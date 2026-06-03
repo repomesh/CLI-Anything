@@ -261,6 +261,19 @@ def test_wavetone_launch_fails_on_early_nonzero_exit(monkeypatch: pytest.MonkeyP
     assert data["launch"]["exit_code"] == 42
 
 
+def test_wavetone_launch_reports_runtime_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_launch_wavetone(**kwargs: object) -> dict[str, object]:
+        raise RuntimeError("WaveTone launch requires Windows")
+
+    monkeypatch.setattr(wavetone_backend, "launch_wavetone", fake_launch_wavetone)
+
+    result = CliRunner().invoke(cli, ["--json", "wavetone", "launch"])
+
+    assert result.exit_code == 1
+    assert "WaveTone launch requires Windows" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_launch_requires_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wavetone_backend.platform, "system", lambda: "Linux")
 
